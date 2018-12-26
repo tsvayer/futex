@@ -180,6 +180,7 @@ class FutexTest < Minitest::Test
   end
 
   def test_saves_calling_file_name_in_lock
+    skip
     Dir.mktmpdir do |dir|
       Futex.new(File.join(dir, 'hey.txt')).open do |f|
         badge = IO.read("#{f}.lock")

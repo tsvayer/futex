@@ -121,7 +121,7 @@ access to #{@path}, #{age(start)} already: #{IO.read(@lock)} \
       end
       debug("Locked by #{b} in #{age(start)}, #{prefix}exclusive: \
 #{@path} (attempt no.#{cycle})")
-      File.write(@lock, b)
+      # File.write(@lock, b)
       acq = Time.now
       res = block_given? ? yield(@path) : nil
       debug("Unlocked by #{b} in #{age(acq)}, #{prefix}exclusive: #{@path}")
@@ -163,41 +163,45 @@ access to #{@path}, #{age(start)} already: #{IO.read(@lock)} \
   def open_synchronized(path)
     path = File.absolute_path(path)
     file = nil
-    synchronized do |ref_counts_file|
+    synchronized(path) do
       file = File.open(path, File::CREAT | File::RDWR)
-      ref_counts = deserialize(File.read(ref_counts_file.path))
-      ref_counts[path] = (ref_counts[path] || 0) + 1
-      File.write(ref_counts_file.path, serialize(ref_counts))
+      ref_count = (file.read.to_i || 0) + 1
+      file.rewind
+      file.write(ref_count)
+      file.flush
+      file.truncate(file.pos)
     end
     yield file
   ensure
-    synchronized do |ref_counts_file|
-      file.close
-      ref_counts = deserialize(File.read(ref_counts_file.path))
-      ref_counts[path] -= 1
-      if ref_counts[path].zero?
-        FileUtils.rm(path, force: true)
-        ref_counts.delete(path)
+    unless file.nil?
+      synchronized(path) do
+        file.rewind
+        ref_count = file.read.to_i - 1
+        if ref_count.zero?
+          file.close
+          FileUtils.rm(file.path, force: true)
+        else
+          file.rewind
+          file.write(ref_count)
+          file.flush
+          file.truncate(file.pos)
+          file.close
+        end
       end
-      File.write(ref_counts_file.path, serialize(ref_counts))
     end
   end
 
-  def synchronized
-    ref_counts_file = File.join(Dir.tmpdir, '.futex.lock')
-    File.open(ref_counts_file, File::CREAT | File::RDWR) do |f|
-      f.flock(File::LOCK_EX)
-      yield f
+  def synchronized(path)
+    lock_path = path + '.lock'
+    File.open(lock_path, File::CREAT | File::EXCL) do
+      yield
     end
-  end
-
-  def serialize(data)
-    # NOTE: JSON is just an example,
-    # use whatever serialization is more appropriate here
-    data.to_json
-  end
-
-  def deserialize(data)
-    data.empty? ? {} : JSON.parse(data)
+  rescue Errno::EEXIST
+    retry
+  rescue Errno::ENOENT
+    # Temporary directory created in unit tests
+    # where this file is stored may be deleted at this stage
+  ensure
+    FileUtils.rm(lock_path, force: true)
   end
 end
